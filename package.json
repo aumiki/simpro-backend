@@ -2,23 +2,13 @@
   "name": "simpro-backend",
   "version": "1.0.0",
   "description": "SIMPRO Backend",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-  "start": "node server.js",
-  "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node server.js"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/aumiki/simpro-backend.git"
+  "engines": {
+    "node": ">=18.0.0"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
-  "bugs": {
-    "url": "https://github.com/aumiki/simpro-backend/issues"
-  },
-  "homepage": "https://github.com/aumiki/simpro-backend#readme",
   "dependencies": {
     "bcrypt": "^6.0.0",
     "cors": "^2.8.6",
