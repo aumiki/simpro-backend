@@ -99,7 +99,11 @@ app.post("/api/auth/lupa-password", async (req, res) => {
 
 app.get("/api/stok", authMiddleware, async (req, res) => {
   try {
-    const [rows] = await db.query("SELECT * FROM stok_produksi ORDER BY created_at DESC");
+    const userId = req.user.id;
+    const [rows] = await db.query(
+      "SELECT * FROM stok_produksi WHERE user_id=? ORDER BY created_at DESC",
+      [userId]
+    );
     res.json(rows);
   } catch {
     res.status(500).json({ error: "Gagal mengambil data stok" });
@@ -108,13 +112,14 @@ app.get("/api/stok", authMiddleware, async (req, res) => {
 
 app.post("/api/stok", authMiddleware, async (req, res) => {
   try {
+    const userId = req.user.id;
     const { tanggal, produk_key, produk_nama, jumlah } = req.body;
     const tanggalBersih = bersihkanTanggal(tanggal);
     const jumlahInt = parseInt(jumlah, 10);
     const status = hitungStatus(jumlahInt);
     const [result] = await db.query(
-      "INSERT INTO stok_produksi (tanggal, produk_key, produk_nama, jumlah, status) VALUES (?,?,?,?,?)",
-      [tanggalBersih, produk_key, produk_nama, jumlahInt, status]
+      "INSERT INTO stok_produksi (tanggal, produk_key, produk_nama, jumlah, status, user_id) VALUES (?,?,?,?,?,?)",
+      [tanggalBersih, produk_key, produk_nama, jumlahInt, status, userId]
     );
     const [rows] = await db.query("SELECT * FROM stok_produksi WHERE id=?", [result.insertId]);
     res.status(201).json(rows[0]);
@@ -126,9 +131,13 @@ app.post("/api/stok", authMiddleware, async (req, res) => {
 
 app.put("/api/stok/:id", authMiddleware, async (req, res) => {
   try {
+    const userId = req.user.id;
     const jumlahInt = parseInt(req.body.jumlah, 10);
     const status = hitungStatus(jumlahInt);
-    await db.query("UPDATE stok_produksi SET jumlah=?, status=? WHERE id=?", [jumlahInt, status, req.params.id]);
+    await db.query(
+      "UPDATE stok_produksi SET jumlah=?, status=? WHERE id=? AND user_id=?",
+      [jumlahInt, status, req.params.id, userId]
+    );
     const [rows] = await db.query("SELECT * FROM stok_produksi WHERE id=?", [req.params.id]);
     res.json(rows[0]);
   } catch {
@@ -142,18 +151,24 @@ app.put("/api/stok/:id", authMiddleware, async (req, res) => {
 
 app.get("/api/distribusi", authMiddleware, async (req, res) => {
   try {
-    const [rows] = await db.query("SELECT * FROM distribusi ORDER BY created_at DESC");
+    const userId = req.user.id;
+    res.setHeader('Cache-Control', 'no-store');
+    const [rows] = await db.query(
+      "SELECT * FROM distribusi WHERE user_id=? ORDER BY created_at DESC",
+      [userId]
+    );
     res.json(rows);
   } catch {
     res.status(500).json({ error: "Gagal mengambil distribusi" });
   }
 });
 
-// POST — tambah distribusi + kurangi stok (FIFO)
+// POST — tambah distribusi + kurangi stok (FIFO per user)
 app.post("/api/distribusi", authMiddleware, async (req, res) => {
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
+    const userId = req.user.id;
 
     const { tgl_distribusi, pelanggan, telp_pelanggan, no_kendaraan,
             telp_kondektur, lokasi, produk_key, tgl_produksi, kadaluarsa } = req.body;
@@ -165,23 +180,16 @@ app.post("/api/distribusi", authMiddleware, async (req, res) => {
     const tglProduksiBersih   = bersihkanTanggal(tgl_produksi);
     const kadaluarsaBersih    = bersihkanTanggal(kadaluarsa);
 
-    console.log("=== POST /api/distribusi ===");
-    console.log("produk_key:", produk_key, "| jumlah:", jumlah, typeof jumlah);
-
-    // Ambil stok terlama yang masih ada (FIFO)
+    // Ambil stok terlama milik user ini (FIFO)
     const [stokRows] = await conn.query(
-      "SELECT id, jumlah FROM stok_produksi WHERE produk_key = ? AND jumlah > 0 ORDER BY tanggal ASC LIMIT 1 FOR UPDATE",
-      [produk_key]
+      "SELECT id, jumlah FROM stok_produksi WHERE produk_key=? AND jumlah>0 AND user_id=? ORDER BY tanggal ASC LIMIT 1 FOR UPDATE",
+      [produk_key, userId]
     );
-
-    console.log("stokRows:", JSON.stringify(stokRows));
 
     if (!stokRows.length)
       throw new Error("Stok tidak ditemukan untuk produk ini");
 
     const stokTersedia = parseInt(stokRows[0].jumlah, 10);
-    console.log("stok tersedia:", stokTersedia, "| diminta:", jumlah);
-
     if (stokTersedia < jumlah)
       throw new Error(`Stok tidak cukup. Tersedia: ${stokTersedia}, diminta: ${jumlah}`);
 
@@ -193,10 +201,10 @@ app.post("/api/distribusi", authMiddleware, async (req, res) => {
 
     const [result] = await conn.query(
       `INSERT INTO distribusi (tgl_distribusi, pelanggan, telp_pelanggan, no_kendaraan,
-       telp_kondektur, lokasi, produk_key, tgl_produksi, jumlah, total, kadaluarsa)
-       VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
+       telp_kondektur, lokasi, produk_key, tgl_produksi, jumlah, total, kadaluarsa, user_id)
+       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
       [tglDistribusiBersih, pelanggan, telp_pelanggan, no_kendaraan, telp_kondektur,
-       lokasi, produk_key, tglProduksiBersih, jumlah, total, kadaluarsaBersih]
+       lokasi, produk_key, tglProduksiBersih, jumlah, total, kadaluarsaBersih, userId]
     );
 
     await conn.commit();
@@ -216,6 +224,7 @@ app.put("/api/distribusi/:id", authMiddleware, async (req, res) => {
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
+    const userId = req.user.id;
 
     const { pelanggan, tgl_distribusi, telp_pelanggan,
             no_kendaraan, telp_kondektur, lokasi } = req.body;
@@ -223,7 +232,10 @@ app.put("/api/distribusi/:id", authMiddleware, async (req, res) => {
     const total  = parseInt(req.body.total,  10) || 0;
     const distId = req.params.id;
 
-    const [lama] = await conn.query("SELECT * FROM distribusi WHERE id=?", [distId]);
+    const [lama] = await conn.query(
+      "SELECT * FROM distribusi WHERE id=? AND user_id=?",
+      [distId, userId]
+    );
     if (!lama.length) throw new Error("Distribusi tidak ditemukan");
 
     const jumlahLama = parseInt(lama[0].jumlah, 10);
@@ -231,23 +243,25 @@ app.put("/api/distribusi/:id", authMiddleware, async (req, res) => {
 
     if (selisih !== 0) {
       const [stokRows] = await conn.query(
-        "SELECT id, jumlah FROM stok_produksi WHERE produk_key=? AND jumlah > 0 ORDER BY tanggal ASC LIMIT 1 FOR UPDATE",
-        [lama[0].produk_key]
+        "SELECT id, jumlah FROM stok_produksi WHERE produk_key=? AND jumlah>0 AND user_id=? ORDER BY tanggal ASC LIMIT 1 FOR UPDATE",
+        [lama[0].produk_key, userId]
       );
       if (!stokRows.length) throw new Error("Data stok tidak ditemukan");
       const stokTersedia = parseInt(stokRows[0].jumlah, 10);
       if (selisih > 0 && stokTersedia < selisih)
         throw new Error("Stok tidak cukup untuk penambahan");
       const stokBaru = stokTersedia - selisih;
-      await conn.query("UPDATE stok_produksi SET jumlah=?, status=? WHERE id=?",
-        [stokBaru, hitungStatus(stokBaru), stokRows[0].id]);
+      await conn.query(
+        "UPDATE stok_produksi SET jumlah=?, status=? WHERE id=?",
+        [stokBaru, hitungStatus(stokBaru), stokRows[0].id]
+      );
     }
 
     await conn.query(
       `UPDATE distribusi SET tgl_distribusi=?, pelanggan=?, telp_pelanggan=?,
-       no_kendaraan=?, telp_kondektur=?, lokasi=?, jumlah=?, total=? WHERE id=?`,
+       no_kendaraan=?, telp_kondektur=?, lokasi=?, jumlah=?, total=? WHERE id=? AND user_id=?`,
       [bersihkanTanggal(tgl_distribusi), pelanggan, telp_pelanggan,
-       no_kendaraan, telp_kondektur, lokasi, jumlah, total, distId]
+       no_kendaraan, telp_kondektur, lokasi, jumlah, total, distId, userId]
     );
 
     await conn.commit();
@@ -267,25 +281,31 @@ app.delete("/api/distribusi/:id", authMiddleware, async (req, res) => {
   const conn = await db.getConnection();
   try {
     await conn.beginTransaction();
+    const userId = req.user.id;
 
-    const [rows] = await conn.query("SELECT * FROM distribusi WHERE id=?", [req.params.id]);
+    const [rows] = await conn.query(
+      "SELECT * FROM distribusi WHERE id=? AND user_id=?",
+      [req.params.id, userId]
+    );
     if (!rows.length) throw new Error("Distribusi tidak ditemukan");
 
     const d = rows[0];
     const jumlahKembali = parseInt(d.jumlah, 10);
 
     const [stokRows] = await conn.query(
-      "SELECT id, jumlah FROM stok_produksi WHERE produk_key=? ORDER BY tanggal ASC LIMIT 1",
-      [d.produk_key]
+      "SELECT id, jumlah FROM stok_produksi WHERE produk_key=? AND user_id=? ORDER BY tanggal ASC LIMIT 1",
+      [d.produk_key, userId]
     );
 
     if (stokRows.length) {
       const stokBaru = parseInt(stokRows[0].jumlah, 10) + jumlahKembali;
-      await conn.query("UPDATE stok_produksi SET jumlah=?, status=? WHERE id=?",
-        [stokBaru, hitungStatus(stokBaru), stokRows[0].id]);
+      await conn.query(
+        "UPDATE stok_produksi SET jumlah=?, status=? WHERE id=?",
+        [stokBaru, hitungStatus(stokBaru), stokRows[0].id]
+      );
     }
 
-    await conn.query("DELETE FROM distribusi WHERE id=?", [req.params.id]);
+    await conn.query("DELETE FROM distribusi WHERE id=? AND user_id=?", [req.params.id, userId]);
     await conn.commit();
     res.json({ message: "Distribusi berhasil dihapus" });
   } catch (err) {
@@ -300,8 +320,12 @@ app.delete("/api/distribusi/:id", authMiddleware, async (req, res) => {
 // PUT — update status saja
 app.put("/api/distribusi/:id/status", authMiddleware, async (req, res) => {
   try {
+    const userId = req.user.id;
     const { status } = req.body;
-    await db.query("UPDATE distribusi SET status=? WHERE id=?", [status, req.params.id]);
+    await db.query(
+      "UPDATE distribusi SET status=? WHERE id=? AND user_id=?",
+      [status, req.params.id, userId]
+    );
     const [rows] = await db.query("SELECT * FROM distribusi WHERE id=?", [req.params.id]);
     res.json(rows[0]);
   } catch {
@@ -315,16 +339,17 @@ app.put("/api/distribusi/:id/status", authMiddleware, async (req, res) => {
 
 app.get("/api/keuntungan", authMiddleware, async (req, res) => {
   try {
+    const userId = req.user.id;
     const [rows] = await db.query(`
       SELECT
         DATE_FORMAT(tgl_distribusi, '%Y-%m') AS bulan,
         SUM(total) AS total_keuntungan,
         SUM(jumlah) AS jumlah_transaksi
       FROM distribusi
-      WHERE status = 'Sudah Terkirim'
+      WHERE status = 'Sudah Terkirim' AND user_id = ?
       GROUP BY bulan
       ORDER BY bulan DESC
-    `);
+    `, [userId]);
     res.json(rows);
   } catch {
     res.status(500).json({ error: "Gagal ambil data keuntungan" });
